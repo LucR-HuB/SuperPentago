@@ -121,7 +121,7 @@
 }
 @keyframes spin { to { transform: rotate(360deg); } }
 
-/* modal */
+/* modal générique */
 .modal-backdrop {
   position: fixed; inset: 0;
   display: flex; align-items: center; justify-content: center;
@@ -130,7 +130,7 @@
   z-index: 50;
 }
 .modal {
-  width: 100%; max-width: 420px;
+  width: 100%; max-width: 520px;
   background: linear-gradient(180deg,#ffffff,#f7fafc);
   border: 1px solid #e5e7eb;
   border-radius: 20px;
@@ -151,4 +151,25 @@
 .modal-footer { display:flex; justify-content:flex-end; margin-top: 10px; }
 .btn-cancel {
   padding: 8px 12px; border-radius: 10px; border:1px solid #e5e7eb; background:#fff;
+}
+
+/* cartes d’IA */
+.ai-grid { display:grid; grid-template-columns: 1fr; gap:12px; }
+@media (min-width: 560px){ .ai-grid { grid-template-columns: 1fr 1fr; } }
+.ai-card {
+  border:1px solid #e5e7eb; border-radius:16px; background:#fff; padding:14px;
+  box-shadow: 0 10px 24px rgba(0,0,0,0.08);
+  display:flex; flex-direction:column; gap:10px; min-height: 140px;
+}
+.ai-title { font-weight: 700; font-size: 16px; }
+.ai-desc { font-size: 13px; color:#475569; min-height: 48px; }
+.ai-traits { display:flex; gap:6px; flex-wrap:wrap; }
+.ai-chip { font-size:11px; padding:4px 8px; border-radius:9999px; background:#f1f5f9; border:1px solid #e2e8f0; }
+.ai-card.disabled { opacity: .55; pointer-events: none; }
+.ai-card .choose {
+  margin-top:auto; height:38px; border-radius:10px; border:1px solid #d1d5db; background:#fff;
+  font-weight:600;
+}
+.ai-badge {
+  margin-left:auto; font-size:11px; padding:2px 8px; border-radius:9999px; background:#fef3c7; border:1px solid #fde68a;
 }

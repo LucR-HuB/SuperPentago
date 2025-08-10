@@ -24,11 +24,11 @@ export async function apiPlay(gid: string, cell: string, quadrant: string, direc
   return r.json()
 }
 
-export async function apiBot(gid: string, depth: number, time_ms?: number): Promise<BotMoveResponse> {
+export async function apiBot(gid: string, depth: number, time_ms?: number, engine?: string): Promise<BotMoveResponse> {
   const r = await fetch(`${BASE}/bot/${gid}`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ depth, time_ms }),
+    body: JSON.stringify({ depth, time_ms, engine }),
   })
   if (!r.ok) throw new Error("bot")
   return r.json()

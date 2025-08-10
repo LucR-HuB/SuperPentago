@@ -1,12 +1,14 @@
-from uuid import uuid4
-from typing import Dict, Optional, List
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from typing import Dict, Optional
+from uuid import uuid4
+
 from pentago.game import Game
-from pentago.board import Quadrant, Direction, Player
+from pentago.board import Player, Quadrant, Direction
 from pentago.ai.minimax import best_move
 
+# ---- App & CORS ----
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
@@ -15,92 +17,92 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-games: Dict[str, Game] = {}
+# ---- In-memory store ----
+GAMES: Dict[str, Game] = {}
 
-COLS = "ABCDEF"
-ROWS = "123456"
-QMAP = {"Q00": Quadrant.Q00, "Q01": Quadrant.Q01, "Q10": Quadrant.Q10, "Q11": Quadrant.Q11}
-DMAP = {"CW": Direction.CW, "CCW": Direction.CCW}
-
-class NewGameResponse(BaseModel):
-    game_id: str
-    state: dict
-
-class MoveRequest(BaseModel):
-    cell: str
-    quadrant: str
-    direction: str
+# ---- Models ----
+class PlayRequest(BaseModel):
+    cell: str         # "E5"
+    quadrant: str     # "Q00" | "Q01" | "Q10" | "Q11"
+    direction: str    # "CW" | "CCW"
 
 class BotRequest(BaseModel):
-    depth: int = 3
+    depth: int
     time_ms: Optional[int] = None
+    engine: Optional[str] = "minimax"
 
-class StateResponse(BaseModel):
-    state: dict
+# ---- Helpers ----
+COLS = "ABCDEF"
+ROWS = "123456"
+QMAP_STR_TO_ENUM = {"Q00": Quadrant.Q00, "Q01": Quadrant.Q01, "Q10": Quadrant.Q10, "Q11": Quadrant.Q11}
+DMAP_STR_TO_ENUM = {"CW": Direction.CW, "CCW": Direction.CCW}
 
-class BotMoveResponse(BaseModel):
-    state: dict
-    move: str
-
-def serialize(g: Game) -> dict:
-    w = g.winner()
-    return {
-        "grid": [row[:] for row in g.board.grid],
-        "to_move": "B" if g.current_player() == Player.BLACK else "W",
-        "terminal": g.terminal(),
-        "winner": "B" if w == Player.BLACK else ("W" if w == Player.WHITE else None),
-    }
+def to_state(g: Game) -> dict:
+    grid = [row[:] for row in g.board.grid]
+    to_move = "B" if g.current_player() == Player.BLACK else "W"
+    term = g.terminal()
+    win = g.winner()
+    winner = ("B" if win == Player.BLACK else "W") if win is not None else None
+    return {"grid": grid, "to_move": to_move, "terminal": term, "winner": winner}
 
 def parse_cell(cell: str) -> tuple[int, int]:
     s = cell.strip().upper()
     if len(s) != 2 or s[0] not in COLS or s[1] not in ROWS:
-        raise ValueError("cell")
+        raise ValueError("invalid cell")
     c = COLS.index(s[0])
     r = ROWS.index(s[1])
     return r, c
 
-def move_to_str(r: int, c: int, q: Quadrant, d: Direction) -> str:
-    cell = f"{COLS[c]}{ROWS[r]}"
-    qname = {Quadrant.Q00: "Q00", Quadrant.Q01: "Q01", Quadrant.Q10: "Q10", Quadrant.Q11: "Q11"}[q]
-    dname = "CW" if d == Direction.CW else "CCW"
-    return f"{cell} {qname} {dname}"
+def parse_play(req: PlayRequest) -> tuple[int, int, Quadrant, Direction]:
+    r, c = parse_cell(req.cell)
+    q = QMAP_STR_TO_ENUM.get(req.quadrant.upper())
+    d = DMAP_STR_TO_ENUM.get(req.direction.upper())
+    if q is None:
+        raise ValueError("invalid quadrant")
+    if d is None:
+        raise ValueError("invalid direction")
+    return r, c, q, d
 
-@app.post("/new", response_model=NewGameResponse)
+# ---- Endpoints ----
+@app.post("/new")
 def new_game():
-    gid = uuid4().hex
     g = Game()
-    games[gid] = g
-    return {"game_id": gid, "state": serialize(g)}
+    gid = uuid4().hex
+    GAMES[gid] = g
+    return {"game_id": gid, "state": to_state(g)}
 
-@app.get("/state/{game_id}", response_model=StateResponse)
-def get_state(game_id: str):
-    g = games.get(game_id)
-    if not g:
-        raise HTTPException(status_code=404, detail="not found")
-    return {"state": serialize(g)}
+@app.get("/state/{gid}")
+def state(gid: str):
+    g = GAMES.get(gid)
+    if g is None:
+        raise HTTPException(404, "unknown game")
+    return {"state": to_state(g)}
 
-@app.post("/play/{game_id}", response_model=StateResponse)
-def play_move(game_id: str, req: MoveRequest):
-    g = games.get(game_id)
-    if not g:
-        raise HTTPException(status_code=404, detail="not found")
+@app.post("/play/{gid}")
+def play(gid: str, req: PlayRequest):
+    g = GAMES.get(gid)
+    if g is None:
+        raise HTTPException(404, "unknown game")
     try:
-        r, c = parse_cell(req.cell)
-        q = QMAP[req.quadrant.upper()]
-        d = DMAP[req.direction.upper()]
+        r, c, q, d = parse_play(req)
         g.play(r, c, q, d)
-    except Exception:
-        raise HTTPException(status_code=400, detail="illegal move")
-    return {"state": serialize(g)}
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"state": to_state(g)}
 
-@app.post("/bot/{game_id}", response_model=BotMoveResponse)
-def bot_move(game_id: str, req: BotRequest):
-    g = games.get(game_id)
-    if not g:
-        raise HTTPException(status_code=404, detail="not found")
-    if g.terminal():
-        return {"state": serialize(g), "move": ""}
-    mv = best_move(g.board, g.current_player(), max_depth=req.depth, time_ms=req.time_ms)
-    r, c, q, d = mv
+@app.post("/bot/{gid}")
+def bot(gid: str, req: BotRequest):
+    g = GAMES.get(gid)
+    if g is None:
+        raise HTTPException(404, "unknown game")
+    engine = (req.engine or "minimax").lower()
+    if engine != "minimax":
+        raise HTTPException(400, "engine not implemented yet")
+
+    side = g.current_player()
+    r, c, q, d = best_move(g.board, player_to_move=side, max_depth=req.depth, time_ms=req.time_ms)
     g.play(r, c, q, d)
-    return {"state": serialize(g), "move": move_to_str(r, c, q, d)}
+
+    cell = f"{COLS[c]}{ROWS[r]}"
+    move_str = f"{cell} {q.name} {d.name}"
+    return {"move": move_str, "state": to_state(g), "engine": engine}

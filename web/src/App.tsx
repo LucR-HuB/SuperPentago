@@ -6,6 +6,14 @@ import type { GameState } from "./types"
 type Q = "Q00" | "Q01" | "Q10" | "Q11"
 type D = "CW" | "CCW"
 
+type EngineId = "minimax" | "mcts" | "policy"
+
+const ENGINES: { id: EngineId; title: string; desc: string; traits: string[]; ready: boolean }[] = [
+  { id: "minimax", title: "Minimax αβ", desc: "Recherche déterministe avec élagage alpha-beta. Forte tactique courte portée.", traits: ["Déterministe", "Rapide", "Forces tactiques"], ready: true },
+  { id: "mcts", title: "MCTS", desc: "Arbre de Monte-Carlo guidé par simulations. Bon milieu de partie.", traits: ["Stochastique", "Évolutif"], ready: false },
+  { id: "policy", title: "Policy + Value", desc: "Réseau de politique/valeur type AlphaZero. Apprentissage auto-jeu.", traits: ["Appris", "Évaluation rapide"], ready: false },
+]
+
 function parseMove(m: string): { r: number; c: number; q: Q; d: D } {
   const [cell, q, d] = m.trim().split(/\s+/)
   const c = "ABCDEF".indexOf(cell[0])
@@ -51,6 +59,9 @@ export default function App() {
   const [error, setError] = useState("")
   const [human, setHuman] = useState<"B" | "W">("B")
   const [showColorModal, setShowColorModal] = useState(false)
+  const [engine, setEngine] = useState<EngineId>("minimax")
+  const [showEngineModal, setShowEngineModal] = useState(false)
+
   const bot = human === "B" ? "W" : "B"
 
   useEffect(() => {
@@ -107,7 +118,7 @@ export default function App() {
     setBusy(true)
     setError("")
     try {
-      const res = await apiBot(gid, depth, timeMs)
+      const res = await apiBot(gid, depth, timeMs, engine)
       const { r, c, q, d } = parseMove(res.move)
       setSelectedCell({ r, c })
       setSelectedQuadrant(q)
@@ -133,7 +144,7 @@ export default function App() {
   useEffect(() => {
     if (!state || state.terminal) return
     if (state.to_move === bot && !busy) triggerBot()
-  }, [state, busy, bot])
+  }, [state, busy, bot, engine, depth, timeMs])
 
   async function startNewGame(h: "B" | "W") {
     if (busy) return
@@ -175,6 +186,10 @@ export default function App() {
         <div className="flex items-center justify-between mb-6">
           <h1 className="text-3xl font-extrabold tracking-tight drop-shadow-sm">SuperPentago</h1>
           <div className="flex items-center gap-3">
+            <button className="px-3 py-2 rounded-lg bg-white border border-gray-300 shadow-sm text-sm"
+                    onClick={()=>setShowEngineModal(true)}>
+              IA : {ENGINES.find(e=>e.id===engine)?.title || "—"}
+            </button>
             <div className="flex items-center gap-2">
               <label className="text-sm">Profondeur: {depth}</label>
               <input type="range" min={1} max={6} value={depth} onChange={(e)=>setDepth(parseInt(e.target.value))}/>
@@ -224,7 +239,8 @@ export default function App() {
             </div>
 
             <div className="bg-white rounded-2xl border border-gray-200 shadow p-4 flex flex-col gap-3">
-              <div className="text-sm font-semibold">IA</div>
+              <div className="text-sm font-semibold">Paramètres IA</div>
+              <div className="text-sm">Moteur : {ENGINES.find(e=>e.id===engine)?.title}</div>
               <div className="text-sm">Temps (ms)</div>
               <input type="number" min={0} placeholder="ms" value={timeMs ?? ""} onChange={e=>setTimeMs(e.target.value===""? undefined : parseInt(e.target.value))} className="border border-gray-300 rounded px-2 py-1"/>
               <div className="text-xs break-all text-gray-500">Game ID: {gid}</div>
@@ -246,6 +262,40 @@ export default function App() {
             </div>
           </div>
         )}
+
+        {showEngineModal && (
+          <div className="modal-backdrop" onClick={()=>setShowEngineModal(false)}>
+            <div className="modal" onClick={(e)=>e.stopPropagation()}>
+              <div className="flex items-center gap-2">
+                <div className="modal-title">Choisir l’IA</div>
+                <div className="ai-badge">Catalogue</div>
+              </div>
+              <div className="ai-grid">
+                {ENGINES.map(e=>(
+                  <div key={e.id} className={"ai-card " + (!e.ready ? "disabled" : "")}>
+                    <div className="flex items-center justify-between">
+                      <div className="ai-title">{e.title}</div>
+                      {!e.ready && <div className="ai-badge">Bientôt</div>}
+                    </div>
+                    <div className="ai-desc">{e.desc}</div>
+                    <div className="ai-traits">
+                      {e.traits.map(t=> <div key={t} className="ai-chip">{t}</div>)}
+                    </div>
+                    {e.ready && (
+                      <button className="choose" onClick={()=>{ setEngine(e.id); setShowEngineModal(false) }}>
+                        Sélectionner
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </div>
+              <div className="modal-footer">
+                <button className="btn-cancel" onClick={()=>setShowEngineModal(false)}>Fermer</button>
+              </div>
+            </div>
+          </div>
+        )}
+
       </div>
     </div>
   )
