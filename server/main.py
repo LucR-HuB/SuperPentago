@@ -23,7 +23,7 @@ GAMES: Dict[str, Game] = {}
 # ---- Models ----
 class PlayRequest(BaseModel):
     cell: str         # "E5"
-    quadrant: str     # "Q00" | "Q01" | "Q10" | "Q11"
+    quadrant: str   
     direction: str    # "CW" | "CCW"
 
 class BotRequest(BaseModel):
