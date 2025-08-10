@@ -8,7 +8,6 @@ from pentago.game import Game
 from pentago.board import Player, Quadrant, Direction
 from pentago.ai.minimax import best_move
 
-# ---- App & CORS ----
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
@@ -17,10 +16,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ---- In-memory store ----
 GAMES: Dict[str, Game] = {}
 
-# ---- Models ----
 class PlayRequest(BaseModel):
     cell: str      
     quadrant: str   
@@ -31,7 +28,6 @@ class BotRequest(BaseModel):
     time_ms: Optional[int] = None
     engine: Optional[str] = "minimax"
 
-# ---- Helpers ----
 COLS = "ABCDEF"
 ROWS = "123456"
 QMAP_STR_TO_ENUM = {"Q00": Quadrant.Q00, "Q01": Quadrant.Q01, "Q10": Quadrant.Q10, "Q11": Quadrant.Q11}
