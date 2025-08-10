@@ -1,0 +1,17 @@
+LICENSE
+README.md
+pyproject.toml
+src/pentago/__init__.py
+src/pentago/board.py
+src/pentago/game.py
+src/pentago/player.py
+src/pentago.egg-info/PKG-INFO
+src/pentago.egg-info/SOURCES.txt
+src/pentago.egg-info/dependency_links.txt
+src/pentago.egg-info/top_level.txt
+src/pentago/ai/mcts.py
+src/pentago/ai/minimax.py
+src/pentago/ai/nn.py
+tests/test_board.py
+tests/test_rotation.py
+tests/test_wincheck.py
