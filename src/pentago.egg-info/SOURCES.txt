@@ -12,6 +12,10 @@ src/pentago.egg-info/top_level.txt
 src/pentago/ai/mcts.py
 src/pentago/ai/minimax.py
 src/pentago/ai/nn.py
+tests/test_api.py
 tests/test_board.py
+tests/test_gameflow.py
+tests/test_minimax.py
+tests/test_minimax_tt.py
 tests/test_rotation.py
 tests/test_wincheck.py
