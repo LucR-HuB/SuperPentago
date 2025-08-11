@@ -183,3 +183,17 @@
   transform: none;
   box-shadow: none;
 }
+
+.status-chip{
+  display:inline-flex;align-items:center;gap:8px;
+  background:rgba(255,255,255,.7);
+  border:1px solid #e5e7eb;border-radius:9999px;
+  padding:6px 10px; backdrop-filter:saturate(120%) blur(2px);
+  box-shadow:0 6px 16px rgba(0,0,0,.12);
+  margin-bottom:12px;
+}
+.spinner-sm{
+  width:14px;height:14px;border-radius:50%;
+  border:2px solid rgba(17,24,39,.2);border-top-color:#111827;
+  animation: spin 1s linear infinite;
+}
