@@ -1,23 +1,22 @@
-export type Grid = number[][]
-export type ToMove = "B" | "W"
-
+export type Grid = number[][];
 export type GameState = {
-  grid: Grid
-  to_move: ToMove
-  terminal: boolean
-  winner: ToMove | null
-}
+  grid: Grid;
+  to_move: "B" | "W";
+  terminal: boolean;
+  winner: "B" | "W" | null;
+};
 
 export type NewGameResponse = {
-  game_id: string
-  state: GameState
-}
+  game_id: string;
+  state: GameState;
+};
 
 export type StateResponse = {
-  state: GameState
-}
+  state: GameState;
+};
 
 export type BotMoveResponse = {
-  state: GameState
-  move: string
-}
+  move: string;
+  state: GameState;
+  engine: "minimax" | "mcts";
+};

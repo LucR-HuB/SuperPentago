@@ -5,8 +5,9 @@ from typing import Dict, Optional
 from uuid import uuid4
 
 from pentago.game import Game
-from pentago.board import Player, Quadrant, Direction
-from pentago.ai.minimax import best_move
+from pentago.board import Player
+from pentago.ai.minimax import best_move as minimax_best
+from pentago.ai.mcts import best_move_mcts as mcts_best
 
 app = FastAPI()
 app.add_middleware(
@@ -19,9 +20,9 @@ app.add_middleware(
 GAMES: Dict[str, Game] = {}
 
 class PlayRequest(BaseModel):
-    cell: str      
-    quadrant: str   
-    direction: str  
+    cell: str
+    quadrant: str
+    direction: str
 
 class BotRequest(BaseModel):
     depth: int
@@ -30,8 +31,6 @@ class BotRequest(BaseModel):
 
 COLS = "ABCDEF"
 ROWS = "123456"
-QMAP_STR_TO_ENUM = {"Q00": Quadrant.Q00, "Q01": Quadrant.Q01, "Q10": Quadrant.Q10, "Q11": Quadrant.Q11}
-DMAP_STR_TO_ENUM = {"CW": Direction.CW, "CCW": Direction.CCW}
 
 def to_state(g: Game) -> dict:
     grid = [row[:] for row in g.board.grid]
@@ -49,17 +48,16 @@ def parse_cell(cell: str) -> tuple[int, int]:
     r = ROWS.index(s[1])
     return r, c
 
-def parse_play(req: PlayRequest) -> tuple[int, int, Quadrant, Direction]:
+def parse_play(req: PlayRequest) -> tuple[int, int, str, str]:
     r, c = parse_cell(req.cell)
-    q = QMAP_STR_TO_ENUM.get(req.quadrant.upper())
-    d = DMAP_STR_TO_ENUM.get(req.direction.upper())
-    if q is None:
+    q = req.quadrant.upper()
+    d = req.direction.upper()
+    if q not in {"Q00", "Q01", "Q10", "Q11"}:
         raise ValueError("invalid quadrant")
-    if d is None:
+    if d not in {"CW", "CCW"}:
         raise ValueError("invalid direction")
     return r, c, q, d
 
-# ---- Endpoints ----
 @app.post("/new")
 def new_game():
     g = Game()
@@ -81,7 +79,10 @@ def play(gid: str, req: PlayRequest):
         raise HTTPException(404, "unknown game")
     try:
         r, c, q, d = parse_play(req)
-        g.play(r, c, q, d)
+        qmap = {"Q00": 0, "Q01": 1, "Q10": 2, "Q11": 3}
+        dmap = {"CW": 1, "CCW": -1}
+        from pentago.board import Quadrant, Direction
+        g.play(r, c, Quadrant(qmap[q]), Direction(dmap[d]))
     except ValueError as e:
         raise HTTPException(400, str(e))
     return {"state": to_state(g)}
@@ -92,13 +93,15 @@ def bot(gid: str, req: BotRequest):
     if g is None:
         raise HTTPException(404, "unknown game")
     engine = (req.engine or "minimax").lower()
-    if engine != "minimax":
-        raise HTTPException(400, "engine not implemented yet")
-
     side = g.current_player()
-    r, c, q, d = best_move(g.board, player_to_move=side, max_depth=req.depth, time_ms=req.time_ms)
-    g.play(r, c, q, d)
+    if engine == "minimax":
+        r, c, q, d = minimax_best(g.board, player_to_move=side, max_depth=req.depth, time_ms=req.time_ms)
+    elif engine == "mcts":
+        r, c, q, d = mcts_best(g.board, player_to_move=side, time_ms=req.time_ms)
+    else:
+        raise HTTPException(400, "engine not implemented")
 
     cell = f"{COLS[c]}{ROWS[r]}"
     move_str = f"{cell} {q.name} {d.name}"
+    g.play(r, c, q, d)
     return {"move": move_str, "state": to_state(g), "engine": engine}
