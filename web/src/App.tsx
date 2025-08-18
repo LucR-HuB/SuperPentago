@@ -1,14 +1,27 @@
-import { useEffect, useMemo, useState } from "react"
+import { useEffect, useMemo, useState, useRef } from "react"
 import Board, { type BoardPhase, type Coord } from "./components/Board"
-import { apiNew, apiPlay, apiBot } from "./api"
+import { apiNew, apiPlay, apiBot, apiProgress } from "./api"
 import type { GameState } from "./types"
 
 type Q = "Q00" | "Q01" | "Q10" | "Q11"
 type D = "CW" | "CCW"
 type EngineId = "minimax" | "mcts" | "policy"
-
 type Mode = "hvb" | "bvb"
-type BotCfg = { engine: EngineId; depth: number; timeMs?: number }
+type BotPost = {
+  depth: number
+  timeMs?: number
+  engine: EngineId
+  simulations?: number
+}
+type BotCfg = {
+  engine: EngineId
+  // Minimax params
+  mmDepth: number
+  mmTimeMs?: number
+  // MCTS params
+  mcSims: number
+  mcTimeMs?: number
+}
 
 const ENGINES: { id: EngineId; title: string; desc: string; ready: boolean }[] = [
   { id: "minimax", title: "Minimax αβ", desc: "Recherche déterministe avec élagage alpha-beta.", ready: true },
@@ -51,6 +64,127 @@ function winningCells(grid: number[][]): { r: number; c: number }[] | null {
   return null
 }
 
+/* ====================== Barre de progression — polling serveur ====================== */
+type ServerProgress = {
+  engine: "mcts" | "minimax" | string
+  sims_done?: number
+  sims_target?: number
+  elapsed_ms?: number
+  time_ms?: number
+}
+
+function formatMs(ms?: number) {
+  if (ms === undefined) return ""
+  if (ms < 1000) return `${Math.round(ms)} ms`
+  return `${(ms / 1000).toFixed(1)} s`
+}
+
+// remplace TOUT ton hook useProgressPolling par ceci :
+function useProgressPolling() {
+  const [visible, setVisible] = useState(false)
+  const [label, setLabel] = useState("")
+  const [percent, setPercent] = useState(0)
+  const [indeterminate, setIndeterminate] = useState(true)
+  const [extra, setExtra] = useState<string>("")
+  const intervalRef = useRef<number | null>(null)
+  const lastGidRef = useRef<string | null>(null)
+
+  function clearTimer() {
+    if (intervalRef.current !== null) {
+      clearInterval(intervalRef.current)
+      intervalRef.current = null
+    }
+  }
+
+  function stop() {
+    clearTimer()
+    setPercent(1)
+    setTimeout(() => {
+      setVisible(false)
+      setPercent(0)
+      setExtra("")
+      setLabel("")
+      setIndeterminate(true)
+    }, 200)
+  }
+
+  function start(gid: string, text: string) {
+    // TOUJOURS redémarrer proprement
+    if (intervalRef.current !== null) {
+      clearInterval(intervalRef.current)
+      intervalRef.current = null
+    }
+  
+    lastGidRef.current = gid
+    setLabel(text)
+    setVisible(true)
+    setIndeterminate(true)
+    setPercent(0)
+    setExtra("")
+  
+    intervalRef.current = window.setInterval(async () => {
+      try {
+        const p = await apiProgress(gid)
+  
+        // si pas d'engine -> on ne force rien ici (la barre reste visible jusqu'à stop())
+        if (!p.engine) return
+  
+        // 1) priorité aux simulations (MCTS sim-capped)
+        if (p.sims_done != null && p.sims_target && p.sims_target > 0) {
+          const ratio = Math.min(0.99, (p.sims_done as number) / (p.sims_target as number))
+          setPercent(ratio)
+          setIndeterminate(false)
+          setExtra(`${p.sims_done!.toLocaleString()} / ${p.sims_target!.toLocaleString()} sims`)
+        }
+        // 2) sinon temps (Minimax time-capped OU MCTS time-capped)
+        else if (p.elapsed_ms != null && p.time_ms && p.time_ms > 0) {
+          const ratio = Math.min(0.99, (p.elapsed_ms as number) / (p.time_ms as number))
+          setPercent(ratio)
+          setIndeterminate(false)
+          setExtra(`${Math.round(p.elapsed_ms!)}ms / ${p.time_ms}ms`)
+        }
+        // 3) sinon indéterminé
+        else {
+          setIndeterminate(true)
+          setExtra("")
+        }
+      } catch {
+        // ignore
+      }
+    }, 150)
+  }
+
+  // cleanup si le composant est démonté
+  useEffect(() => () => clearTimer(), [])
+
+  return { visible, label, percent, indeterminate, extra, start, stop }
+}
+
+function ProgressFooter(props: {
+  visible: boolean
+  label: string
+  percent: number
+  indeterminate: boolean
+  extra?: string
+}) {
+  if (!props.visible) return null
+  const pct = Math.round(props.percent * 100)
+  return (
+    <div className="progress-footer">
+      <div className="progress-card">
+        <div className="progress-head">
+          <span className="spinner-dot" />
+          <span>{props.label}{props.extra ? ` — ${props.extra}` : ""}{!props.indeterminate ? ` — ${pct}%` : ""}</span>
+        </div>
+        <div className={"progress-bar " + (props.indeterminate ? "progress-indeterminate" : "")}>
+          <div className="progress-fill" style={props.indeterminate ? {} : { width: `${pct}%` }} />
+        </div>
+      </div>
+    </div>
+  )
+}
+/* ======================================================================== */
+
 export default function App() {
   const [mode, setMode] = useState<Mode>("hvb")
 
@@ -61,9 +195,17 @@ export default function App() {
   const [selectedQuadrant, setSelectedQuadrant] = useState<Q | null>(null)
   const [anim, setAnim] = useState<{ q: Q; dir: D; stage: "rotating" | "reset" } | null>(null)
 
-  const [depth, setDepth] = useState<number>(3)
-  const [timeMs, setTimeMs] = useState<number | undefined>(undefined)
+  // HVB: choix moteur + params par moteur (pas de doublon ailleurs)
   const [engine, setEngine] = useState<EngineId>("minimax")
+  const [mmDepth, setMmDepth] = useState<number>(3)
+  const [mmTimeMs, setMmTimeMs] = useState<number | undefined>(undefined)
+  const [mcSims, setMcSims] = useState<number>(2000)
+  const [mcTimeMs, setMcTimeMs] = useState<number | undefined>(undefined)
+
+  // IA vs IA
+  const [showBvbModal, setShowBvbModal] = useState(false)
+  const [botBlack, setBotBlack] = useState<BotCfg>({ engine: "minimax", mmDepth: 3, mcSims: 3000 })
+  const [botWhite, setBotWhite] = useState<BotCfg>({ engine: "mcts", mmDepth: 3, mcSims: 5000 })
 
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState("")
@@ -71,11 +213,10 @@ export default function App() {
   const [showColorModal, setShowColorModal] = useState(false)
   const [showEngineModal, setShowEngineModal] = useState(false)
 
-  const [showBvbModal, setShowBvbModal] = useState(false)
-  const [botBlack, setBotBlack] = useState<BotCfg>({ engine: "minimax", depth: 3 })
-  const [botWhite, setBotWhite] = useState<BotCfg>({ engine: "mcts", depth: 200 }) // pour MCTS: depth=simulations
-
   const bot = human === "B" ? "W" : "B"
+
+  // barre de progression (basée sur /progress/{gid})
+  const progress = useProgressPolling()
 
   useEffect(() => {
     apiNew().then(res => { setGid(res.game_id); setState(res.state); setError("") }).catch(() => setError("init"))
@@ -84,6 +225,8 @@ export default function App() {
   const win = useMemo(() => state ? winningCells(state.grid) : null, [state])
   const bgClass = state ? (mode === "hvb" ? (state.to_move === human ? "bg-human" : "bg-bot") : "bg-neutral") : "bg-neutral"
   const canHoverTiles = !!state && !state.terminal && state.to_move === human && phase === "place" && mode === "hvb"
+
+  function engineTitle(id: EngineId) { return ENGINES.find(e => e.id === id)?.title || id }
 
   function onCellClick(r: number, c: number) {
     if (mode !== "hvb") return
@@ -128,66 +271,120 @@ export default function App() {
     }
   }
 
-  async function triggerBotHVB() {
-    if (mode !== "hvb") return
-    if (busy || !state || state.terminal) return
-    if (state.to_move !== bot) return
-    setBusy(true)
-    setError("")
-    try {
-      const res = await apiBot(gid, depth, timeMs, engine)
-      const { r, c, q, d } = parseMove(res.move)
-      setSelectedCell({ r, c })
-      setSelectedQuadrant(q)
-      setPhase("rotate")
-      setTimeout(() => {
-        setAnim({ q, dir: d, stage: "rotating" })
-        setTimeout(() => {
-          setState(res.state)
-          setSelectedCell(null)
-          setSelectedQuadrant(null)
-          setAnim(a => a ? { ...a, stage: "reset" } : null)
-          requestAnimationFrame(() => setAnim(null))
-          setPhase("place")
-          setBusy(false)
-        }, 320)
-      }, 0)
-    } catch {
-      setBusy(false)
-      setError("bot")
+  // ---- BOT calls ----------------------------------------------------------
+  function depthFromSims(sims: number) {
+    // même mapping que le serveur (sims ≈ depth*500, min 200)
+    return Math.max(1, Math.round(sims / 500))
+  }
+// CHANGÉ : renvoie { depth, timeMs, engine, simulations? }
+function hvbCallParams(): BotPost {
+  if (engine === "minimax") {
+    return { depth: mmDepth, timeMs: mmTimeMs, engine }
+  }
+  if (engine === "mcts") {
+    if (mcTimeMs == null) {
+      // sim-capped → on envoie explicitement 'simulations'
+      return { depth: Math.max(1, Math.round(mcSims / 500)), simulations: mcSims, engine }
     }
+    // time-capped
+    return { depth: Math.max(1, Math.round(mcSims / 500)), timeMs: mcTimeMs, engine }
+  }
+  return { depth: 2, engine }
+}
+
+function bvbCallParams(cfg: BotCfg): BotPost {
+  if (cfg.engine === "minimax") {
+    return { depth: cfg.mmDepth, timeMs: cfg.mmTimeMs, engine: cfg.engine }
+  }
+  if (cfg.engine === "mcts") {
+    if (cfg.mcTimeMs == null) {
+      return { depth: Math.max(1, Math.round(cfg.mcSims / 500)), simulations: cfg.mcSims, engine: cfg.engine }
+    }
+    return { depth: Math.max(1, Math.round(cfg.mcSims / 500)), timeMs: cfg.mcTimeMs, engine: cfg.engine }
+  } 
+  return { depth: 2, engine: cfg.engine }
+}
+
+async function triggerBotHVB() {
+  if (mode !== "hvb") return
+  if (busy || !state || state.terminal) return
+  if (state.to_move !== bot) return
+
+  setBusy(true)
+  setError("")
+  try {
+    const p = hvbCallParams()
+    const who = state?.to_move === "B" ? "Noir" : "Blanc"
+
+    // Barre visible si MCTS ou Minimax avec time budget
+    if (p.engine === "mcts" || (p.engine === "minimax" && p.timeMs && p.timeMs > 0)) {
+      progress.start(gid, `IA (${engineTitle(p.engine)}) — ${who}`)
+    }
+
+    const res = await apiBot(gid, p)
+    const { r, c, q, d } = parseMove(res.move)
+    setSelectedCell({ r, c })
+    setSelectedQuadrant(q)
+    setPhase("rotate")
+    setTimeout(() => {
+      setAnim({ q, dir: d, stage: "rotating" })
+      setTimeout(() => {
+        setState(res.state)
+        setSelectedCell(null)
+        setSelectedQuadrant(null)
+        setAnim(a => a ? { ...a, stage: "reset" } : null)
+        requestAnimationFrame(() => setAnim(null))
+        setPhase("place")
+        setBusy(false)
+        progress.stop()
+      }, 320)
+    }, 0)
+  } catch {
+    setBusy(false)
+    setError("bot")
+    progress.stop()
+  }
+}
+async function triggerBotBVB() {
+  if (mode !== "bvb") return
+  if (busy || !state || state.terminal) return
+
+  const side = state.to_move
+  const cfg = side === "B" ? botBlack : botWhite
+  const p = bvbCallParams(cfg)
+  const who = side === "B" ? "Noir" : "Blanc"
+
+  if (p.engine === "mcts" || (p.engine === "minimax" && p.timeMs && p.timeMs > 0)) {
+    progress.start(gid, `IA (${engineTitle(p.engine)}) — ${who}`)
   }
 
-  async function triggerBotBVB() {
-    if (mode !== "bvb") return
-    if (busy || !state || state.terminal) return
-    const side = state.to_move
-    const cfg = side === "B" ? botBlack : botWhite
-    setBusy(true)
-    setError("")
-    try {
-      const res = await apiBot(gid, cfg.depth, cfg.timeMs, cfg.engine)
-      const { r, c, q, d } = parseMove(res.move)
-      setSelectedCell({ r, c })
-      setSelectedQuadrant(q)
-      setPhase("rotate")
+  setBusy(true)
+  setError("")
+  try {
+    const res = await apiBot(gid, p)
+    const { r, c, q, d } = parseMove(res.move)
+    setSelectedCell({ r, c })
+    setSelectedQuadrant(q)
+    setPhase("rotate")
+    setTimeout(() => {
+      setAnim({ q, dir: d, stage: "rotating" })
       setTimeout(() => {
-        setAnim({ q, dir: d, stage: "rotating" })
-        setTimeout(() => {
-          setState(res.state)
-          setSelectedCell(null)
-          setSelectedQuadrant(null)
-          setAnim(a => a ? { ...a, stage: "reset" } : null)
-          requestAnimationFrame(() => setAnim(null))
-          setPhase("place")
-          setBusy(false)
-        }, 320)
-      }, 0)
-    } catch {
-      setBusy(false)
-      setError("bot")
-    }
+        setState(res.state)
+        setSelectedCell(null)
+        setSelectedQuadrant(null)
+        setAnim(a => a ? { ...a, stage: "reset" } : null)
+        requestAnimationFrame(() => setAnim(null))
+        setPhase("place")
+        setBusy(false)
+        progress.stop()
+      }, 320)
+    }, 0)
+  } catch {
+    setBusy(false)
+    setError("bot")
+    progress.stop()
   }
+}
 
   useEffect(() => {
     if (!state || state.terminal) return
@@ -196,8 +393,10 @@ export default function App() {
     } else {
       if (!busy) triggerBotBVB()
     }
-  }, [state, busy, mode, bot, engine, depth, timeMs, botBlack, botWhite])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state, busy, mode, bot, engine, mmDepth, mmTimeMs, mcSims, mcTimeMs, botBlack, botWhite])
 
+  // ---- New games ----------------------------------------------------------
   async function startNewHVB(h: "B" | "W") {
     if (busy) return
     setMode("hvb")
@@ -241,6 +440,7 @@ export default function App() {
     }
   }
 
+  // ---- UI helpers ---------------------------------------------------------
   function openNewGameModal() {
     if (busy) return
     setShowColorModal(true)
@@ -249,11 +449,6 @@ export default function App() {
     if (busy) return
     setShowBvbModal(true)
   }
-
-  function engineTitle(id: EngineId) {
-    return ENGINES.find(e => e.id === id)?.title || id
-  }
-
   function winnerLabel() {
     if (!state || !state.terminal) return ""
     if (!state.winner) return "Match nul"
@@ -267,6 +462,14 @@ export default function App() {
       return who
     }
   }
+  function botSummary(cfg: BotCfg) {
+    if (cfg.engine === "minimax") {
+      return `Minimax — profondeur ${cfg.mmDepth}${cfg.mmTimeMs ? `, ${cfg.mmTimeMs}ms` : ""}`
+    } else if (cfg.engine === "mcts") {
+      return `MCTS — ${cfg.mcSims} simulations${cfg.mcTimeMs ? `, ${cfg.mcTimeMs}ms` : ""}`
+    }
+    return "Policy (bientôt)"
+  }
 
   const thinkingChip = state && !state.terminal ? (
     <div className="status-chip">
@@ -277,6 +480,7 @@ export default function App() {
     </div>
   ) : null
 
+  // ---- Render -------------------------------------------------------------
   return (
     <div className={"min-h-screen w-full " + bgClass}>
       <div className="mx-auto max-w-6xl px-6 py-10">
@@ -284,15 +488,10 @@ export default function App() {
           <h1 className="text-3xl font-extrabold tracking-tight drop-shadow-sm">SuperPentago</h1>
           <div className="flex items-center gap-3">
             <button className="btn px-3 py-2 rounded-lg bg-white border border-gray-300 shadow-sm text-sm"
-                    onClick={() => setShowEngineModal(true)}>
+                    onClick={() => setShowEngineModal(true)}
+                    disabled={mode !== "hvb"}>
               IA : {engineTitle(engine)}
             </button>
-            {mode === "hvb" && (
-              <div className="flex items-center gap-2">
-                <label className="text-sm">Profondeur: {depth}</label>
-                <input type="range" min={1} max={6} value={depth} onChange={(e) => setDepth(parseInt(e.target.value))}/>
-              </div>
-            )}
             <button onClick={openNewGameModal} disabled={busy} className="btn px-4 py-2 rounded-lg bg-white border border-gray-300 shadow-sm">New game</button>
             <button onClick={openBvbModal} disabled={busy} className="btn px-4 py-2 rounded-lg bg-white border border-gray-300 shadow-sm">IA vs IA</button>
           </div>
@@ -302,10 +501,6 @@ export default function App() {
 
         {state && (
           <div className="relative grid grid-cols-1 md:grid-cols-[auto_320px] gap-8">
-            {mode === "hvb" && busy && state.to_move !== human && (
-              <></>
-            )}
-
             <div className="flex flex-col items-center gap-4">
               <Board
                 grid={state.grid}
@@ -326,20 +521,73 @@ export default function App() {
               {error && <div className="text-sm text-red-700 bg-red-100 px-3 py-1 rounded">{error}</div>}
             </div>
 
+            {/* Panneau paramètres : moteur unique visible ici */}
             <div className="bg-white rounded-2xl border border-gray-200 shadow p-4 flex flex-col gap-3">
               {mode === "hvb" ? (
                 <>
-                  <div className="text-sm font-semibold">Paramètres IA</div>
+                  <div className="text-sm font-semibold">Paramètres IA (adverse)</div>
                   <div className="text-sm">Moteur : {engineTitle(engine)}</div>
-                  <div className="text-sm">Temps (ms)</div>
-                  <input type="number" min={0} placeholder="ms" value={timeMs ?? ""} onChange={e => setTimeMs(e.target.value === "" ? undefined : parseInt(e.target.value))} className="border border-gray-300 rounded px-2 py-1"/>
-                  <div className="text-xs break-all text-gray-500">Game ID: {gid}</div>
+
+                  {engine === "minimax" && (
+                    <>
+                      <label className="text-sm">Profondeur</label>
+                      <input
+                        type="range"
+                        min={1}
+                        max={8}
+                        value={mmDepth}
+                        onChange={(e) => setMmDepth(parseInt(e.target.value || "3"))}
+                      />
+                      <div className="text-xs text-gray-600">Actuelle : {mmDepth}</div>
+
+                      <label className="text-sm mt-2">Temps (ms, optionnel)</label>
+                      <input
+                        type="number"
+                        className="border border-gray-300 rounded px-2 py-1"
+                        value={mmTimeMs ?? ""}
+                        placeholder="ms"
+                        onChange={e => setMmTimeMs(e.target.value === "" ? undefined : parseInt(e.target.value))}
+                      />
+                    </>
+                  )}
+
+                  {engine === "mcts" && (
+                    <>
+                      <label className="text-sm">Simulations</label>
+                      <input
+                        type="number"
+                        className="border border-gray-300 rounded px-2 py-1"
+                        min={200}
+                        step={100}
+                        value={mcSims}
+                        onChange={e => setMcSims(parseInt(e.target.value || "200"))}
+                      />
+                      <div className="text-xs text-gray-600">
+                        Conseil : 200–20 000 (plus = plus fort, plus lent)
+                      </div>
+
+                      <label className="text-sm mt-2">Temps (ms, optionnel)</label>
+                      <input
+                        type="number"
+                        className="border border-gray-300 rounded px-2 py-1"
+                        value={mcTimeMs ?? ""}
+                        placeholder="ms"
+                        onChange={e => setMcTimeMs(e.target.value === "" ? undefined : parseInt(e.target.value))}
+                      />
+                    </>
+                  )}
+
+                  {engine === "policy" && (
+                    <div className="text-xs text-gray-600">Bientôt disponible.</div>
+                  )}
+
+                  <div className="text-xs break-all text-gray-500 mt-2">Game ID: {gid}</div>
                 </>
               ) : (
                 <>
                   <div className="text-sm font-semibold">Match IA vs IA</div>
-                  <div className="text-sm">Noir : {engineTitle(botBlack.engine)} — d={botBlack.depth}{botBlack.timeMs ? `, t=${botBlack.timeMs}ms` : ""}</div>
-                  <div className="text-sm">Blanc : {engineTitle(botWhite.engine)} — d={botWhite.depth}{botWhite.timeMs ? `, t=${botWhite.timeMs}ms` : ""}</div>
+                  <div className="text-sm">Noir : {botSummary(botBlack)}</div>
+                  <div className="text-sm">Blanc : {botSummary(botWhite)}</div>
                   <div className="text-xs break-all text-gray-500">Game ID: {gid}</div>
                 </>
               )}
@@ -409,6 +657,7 @@ export default function App() {
               <div className="ai-note">Choisis un moteur et ses paramètres pour chaque couleur, puis lance le match.</div>
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {/* Noir */}
                 <div className="ai-card">
                   <div className="ai-title">Noir</div>
                   <select
@@ -418,24 +667,51 @@ export default function App() {
                   >
                     {ENGINES.map(e => <option key={e.id} value={e.id} disabled={!e.ready}>{e.title}</option>)}
                   </select>
-                  <label className="text-sm">Profondeur / Simulations</label>
-                  <input
-                    type="number"
-                    className="border border-gray-300 rounded px-2 py-1"
-                    value={botBlack.depth}
-                    min={1}
-                    onChange={e => setBotBlack({ ...botBlack, depth: parseInt(e.target.value || "1") })}
-                  />
-                  <label className="text-sm">Temps (ms, optionnel)</label>
-                  <input
-                    type="number"
-                    className="border border-gray-300 rounded px-2 py-1"
-                    value={botBlack.timeMs ?? ""}
-                    placeholder="ms"
-                    onChange={e => setBotBlack({ ...botBlack, timeMs: e.target.value === "" ? undefined : parseInt(e.target.value) })}
-                  />
+
+                  {botBlack.engine === "minimax" && (
+                    <>
+                      <label className="text-sm">Profondeur</label>
+                      <input
+                        type="number"
+                        className="border border-gray-300 rounded px-2 py-1"
+                        value={botBlack.mmDepth}
+                        min={1}
+                        onChange={e => setBotBlack({ ...botBlack, mmDepth: parseInt(e.target.value || "1") })}
+                      />
+                      <label className="text-sm mt-2">Temps (ms, optionnel)</label>
+                      <input
+                        type="number"
+                        className="border border-gray-300 rounded px-2 py-1"
+                        value={botBlack.mmTimeMs ?? ""}
+                        placeholder="ms"
+                        onChange={e => setBotBlack({ ...botBlack, mmTimeMs: e.target.value === "" ? undefined : parseInt(e.target.value) })}
+                      />
+                    </>
+                  )}
+                  {botBlack.engine === "mcts" && (
+                    <>
+                      <label className="text-sm">Simulations</label>
+                      <input
+                        type="number"
+                        className="border border-gray-300 rounded px-2 py-1"
+                        value={botBlack.mcSims}
+                        min={200}
+                        step={100}
+                        onChange={e => setBotBlack({ ...botBlack, mcSims: parseInt(e.target.value || "200") })}
+                      />
+                      <label className="text-sm mt-2">Temps (ms, optionnel)</label>
+                      <input
+                        type="number"
+                        className="border border-gray-300 rounded px-2 py-1"
+                        value={botBlack.mcTimeMs ?? ""}
+                        placeholder="ms"
+                        onChange={e => setBotBlack({ ...botBlack, mcTimeMs: e.target.value === "" ? undefined : parseInt(e.target.value) })}
+                      />
+                    </>
+                  )}
                 </div>
 
+                {/* Blanc */}
                 <div className="ai-card">
                   <div className="ai-title">Blanc</div>
                   <select
@@ -445,22 +721,48 @@ export default function App() {
                   >
                     {ENGINES.map(e => <option key={e.id} value={e.id} disabled={!e.ready}>{e.title}</option>)}
                   </select>
-                  <label className="text-sm">Profondeur / Simulations</label>
-                  <input
-                    type="number"
-                    className="border border-gray-300 rounded px-2 py-1"
-                    value={botWhite.depth}
-                    min={1}
-                    onChange={e => setBotWhite({ ...botWhite, depth: parseInt(e.target.value || "1") })}
-                  />
-                  <label className="text-sm">Temps (ms, optionnel)</label>
-                  <input
-                    type="number"
-                    className="border border-gray-300 rounded px-2 py-1"
-                    value={botWhite.timeMs ?? ""}
-                    placeholder="ms"
-                    onChange={e => setBotWhite({ ...botWhite, timeMs: e.target.value === "" ? undefined : parseInt(e.target.value) })}
-                  />
+
+                  {botWhite.engine === "minimax" && (
+                    <>
+                      <label className="text-sm">Profondeur</label>
+                      <input
+                        type="number"
+                        className="border border-gray-300 rounded px-2 py-1"
+                        value={botWhite.mmDepth}
+                        min={1}
+                        onChange={e => setBotWhite({ ...botWhite, mmDepth: parseInt(e.target.value || "1") })}
+                      />
+                      <label className="text-sm mt-2">Temps (ms, optionnel)</label>
+                      <input
+                        type="number"
+                        className="border border-gray-300 rounded px-2 py-1"
+                        value={botWhite.mmTimeMs ?? ""}
+                        placeholder="ms"
+                        onChange={e => setBotWhite({ ...botWhite, mmTimeMs: e.target.value === "" ? undefined : parseInt(e.target.value) })}
+                      />
+                    </>
+                  )}
+                  {botWhite.engine === "mcts" && (
+                    <>
+                      <label className="text-sm">Simulations</label>
+                      <input
+                        type="number"
+                        className="border border-gray-300 rounded px-2 py-1"
+                        value={botWhite.mcSims}
+                        min={200}
+                        step={100}
+                        onChange={e => setBotWhite({ ...botWhite, mcSims: parseInt(e.target.value || "200") })}
+                      />
+                      <label className="text-sm mt-2">Temps (ms, optionnel)</label>
+                      <input
+                        type="number"
+                        className="border border-gray-300 rounded px-2 py-1"
+                        value={botWhite.mcTimeMs ?? ""}
+                        placeholder="ms"
+                        onChange={e => setBotWhite({ ...botWhite, mcTimeMs: e.target.value === "" ? undefined : parseInt(e.target.value) })}
+                      />
+                    </>
+                  )}
                 </div>
               </div>
 
@@ -475,6 +777,15 @@ export default function App() {
         )}
 
       </div>
+
+      {/* Barre de progression (bas de page) */}
+      <ProgressFooter
+        visible={progress.visible}
+        label={progress.label}
+        percent={progress.percent}
+        indeterminate={progress.indeterminate}
+        extra={progress.extra}
+      />
     </div>
   )
 }

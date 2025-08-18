@@ -1,6 +1,6 @@
 import time
 import math
-from typing import List, Tuple, Optional, Dict, Any
+from typing import List, Tuple, Optional, Dict, Callable
 from ..board import Board, Player, Quadrant, Direction
 
 Move = Tuple[int, int, Quadrant, Direction]
@@ -117,12 +117,43 @@ def evaluate(board: Board, player_to_maximize: Player) -> int:
         return -1_000_000_000
     return segment_score(board, me)
 
-def search(board: Board, player_to_move: Player, player_to_maximize: Player, depth: int, alpha: int, beta: int, deadline: Optional[float]) -> int:
+# --- petit utilitaire de report temps → callback
+def _maybe_report(progress_cb: Optional[Callable[[int], None]],
+                  start_ts: float,
+                  nodes0: int,
+                  last_report: List[int],
+                  report_every_nodes: int) -> None:
+    if progress_cb is None:
+        return
+    processed = STATS["nodes"] - nodes0
+    if processed - last_report[0] >= report_every_nodes:
+        last_report[0] = processed
+        try:
+            progress_cb(int((time.time() - start_ts) * 1000))
+        except Exception:
+            pass
+
+def search(board: Board,
+           player_to_move: Player,
+           player_to_maximize: Player,
+           depth: int,
+           alpha: int,
+           beta: int,
+           deadline: Optional[float],
+           *,
+           progress_cb: Optional[Callable[[int], None]],
+           start_ts: float,
+           nodes0: int,
+           last_report: List[int],
+           report_every_nodes: int) -> int:
     STATS["nodes"] += 1
     if deadline is not None and time.time() > deadline:
         return evaluate(board, player_to_maximize)
     if depth == 0:
         return evaluate(board, player_to_maximize)
+
+    _maybe_report(progress_cb, start_ts, nodes0, last_report, report_every_nodes)
+
     key = board_key(board, player_to_move)
     STATS["tt_probe"] += 1
     if key in TT:
@@ -138,6 +169,7 @@ def search(board: Board, player_to_move: Player, player_to_maximize: Player, dep
         moves = order_moves(board, player_to_move, generate_moves(board), tt_move)
     else:
         moves = order_moves(board, player_to_move, generate_moves(board), None)
+
     if player_to_move == player_to_maximize:
         best = -math.inf
         best_mv: Optional[Move] = None
@@ -152,7 +184,9 @@ def search(board: Board, player_to_move: Player, player_to_maximize: Player, dep
                 else:
                     val = -1_000_000_000 + (10_000 - depth)
             else:
-                val = search(b2, opponent(player_to_move), player_to_maximize, depth - 1, alpha, beta, deadline)
+                val = search(b2, opponent(player_to_move), player_to_maximize, depth - 1, alpha, beta, deadline,
+                             progress_cb=progress_cb, start_ts=start_ts, nodes0=nodes0,
+                             last_report=last_report, report_every_nodes=report_every_nodes)
             if val > best:
                 best = val
                 best_mv = mv
@@ -161,6 +195,7 @@ def search(board: Board, player_to_move: Player, player_to_maximize: Player, dep
             if beta <= alpha:
                 STATS["cuts"] += 1
                 break
+            _maybe_report(progress_cb, start_ts, nodes0, last_report, report_every_nodes)
         flag = 0
         if best <= a0:
             flag = -1
@@ -182,7 +217,9 @@ def search(board: Board, player_to_move: Player, player_to_maximize: Player, dep
                 else:
                     val = -1_000_000_000 + (10_000 - depth)
             else:
-                val = search(b2, opponent(player_to_move), player_to_maximize, depth - 1, alpha, beta, deadline)
+                val = search(b2, opponent(player_to_move), player_to_maximize, depth - 1, alpha, beta, deadline,
+                             progress_cb=progress_cb, start_ts=start_ts, nodes0=nodes0,
+                             last_report=last_report, report_every_nodes=report_every_nodes)
             if val < best:
                 best = val
                 best_mv = mv
@@ -191,6 +228,7 @@ def search(board: Board, player_to_move: Player, player_to_maximize: Player, dep
             if beta <= alpha:
                 STATS["cuts"] += 1
                 break
+            _maybe_report(progress_cb, start_ts, nodes0, last_report, report_every_nodes)
         flag = 0
         if best <= alpha:
             flag = -1
@@ -199,10 +237,24 @@ def search(board: Board, player_to_move: Player, player_to_maximize: Player, dep
         TT[key] = (depth, int(best), flag, best_mv)
         return int(best)
 
-def best_move(board: Board, player_to_move: Player, max_depth: int = 3, time_ms: Optional[int] = None) -> Move:
-    deadline = None if time_ms is None else time.time() + time_ms / 1000.0
+def best_move(board: Board,
+              player_to_move: Player,
+              max_depth: int = 3,
+              time_ms: Optional[int] = None,
+              progress_cb: Optional[Callable[[int], None]] = None) -> Move:
+    start_ts = time.time()
+    deadline = None if time_ms is None else start_ts + time_ms / 1000.0
     best_mv: Optional[Move] = None
     best_val = -math.inf
+
+    # report ~chaque 2000 nœuds (ajuste si tu veux)
+    report_every_nodes = 2000
+    nodes0 = STATS["nodes"]
+    last_report = [0]
+
+    # premier “heartbeat” pour afficher la barre tout de suite
+    _maybe_report(progress_cb, start_ts, nodes0, last_report, report_every_nodes)
+
     for d in range(1, max_depth + 1):
         if deadline is not None and time.time() > deadline:
             break
@@ -224,17 +276,32 @@ def best_move(board: Board, player_to_move: Player, max_depth: int = 3, time_ms:
                 else:
                     val = -1_000_000_000 + (10_000 - d)
             else:
-                val = search(b2, opponent(player_to_move), player_to_move, d - 1, alpha, beta, deadline)
+                val = search(b2, opponent(player_to_move), player_to_move, d - 1, alpha, beta, deadline,
+                             progress_cb=progress_cb, start_ts=start_ts, nodes0=nodes0,
+                             last_report=last_report, report_every_nodes=report_every_nodes)
             if val > cur_best_val or cur_best_mv is None:
                 cur_best_val = val
                 cur_best_mv = mv
             if cur_best_val > alpha:
                 alpha = cur_best_val
+
+            _maybe_report(progress_cb, start_ts, nodes0, last_report, report_every_nodes)
+
         if cur_best_mv is not None:
             best_mv = cur_best_mv
             best_val = cur_best_val
         else:
             break
+
+        _maybe_report(progress_cb, start_ts, nodes0, last_report, report_every_nodes)
+
+    # report final
+    if progress_cb is not None:
+        try:
+            progress_cb(int((time.time() - start_ts) * 1000))
+        except Exception:
+            pass
+
     if best_mv is None:
         ms = generate_moves(board)
         return ms[0]
