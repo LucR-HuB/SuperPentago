@@ -15,10 +15,8 @@ type BotPost = {
 }
 type BotCfg = {
   engine: EngineId
-  // Minimax params
   mmDepth: number
   mmTimeMs?: number
-  // MCTS params
   mcSims: number
   mcTimeMs?: number
 }
@@ -64,7 +62,6 @@ function winningCells(grid: number[][]): { r: number; c: number }[] | null {
   return null
 }
 
-/* ====================== Barre de progression — polling serveur ====================== */
 type ServerProgress = {
   engine: "mcts" | "minimax" | string
   sims_done?: number
@@ -79,7 +76,6 @@ function formatMs(ms?: number) {
   return `${(ms / 1000).toFixed(1)} s`
 }
 
-// remplace TOUT ton hook useProgressPolling par ceci :
 function useProgressPolling() {
   const [visible, setVisible] = useState(false)
   const [label, setLabel] = useState("")
@@ -109,7 +105,6 @@ function useProgressPolling() {
   }
 
   function start(gid: string, text: string) {
-    // TOUJOURS redémarrer proprement
     if (intervalRef.current !== null) {
       clearInterval(intervalRef.current)
       intervalRef.current = null
@@ -125,36 +120,36 @@ function useProgressPolling() {
     intervalRef.current = window.setInterval(async () => {
       try {
         const p = await apiProgress(gid)
+        if (p.done) {
+          setPercent(1)
+          setIndeterminate(false)
+          setTimeout(() => stop(), 100)
+          return
+        }
   
-        // si pas d'engine -> on ne force rien ici (la barre reste visible jusqu'à stop())
         if (!p.engine) return
   
-        // 1) priorité aux simulations (MCTS sim-capped)
         if (p.sims_done != null && p.sims_target && p.sims_target > 0) {
           const ratio = Math.min(0.99, (p.sims_done as number) / (p.sims_target as number))
           setPercent(ratio)
           setIndeterminate(false)
           setExtra(`${p.sims_done!.toLocaleString()} / ${p.sims_target!.toLocaleString()} sims`)
         }
-        // 2) sinon temps (Minimax time-capped OU MCTS time-capped)
         else if (p.elapsed_ms != null && p.time_ms && p.time_ms > 0) {
           const ratio = Math.min(0.99, (p.elapsed_ms as number) / (p.time_ms as number))
           setPercent(ratio)
           setIndeterminate(false)
           setExtra(`${Math.round(p.elapsed_ms!)}ms / ${p.time_ms}ms`)
         }
-        // 3) sinon indéterminé
         else {
           setIndeterminate(true)
           setExtra("")
         }
       } catch {
-        // ignore
       }
     }, 150)
   }
 
-  // cleanup si le composant est démonté
   useEffect(() => () => clearTimer(), [])
 
   return { visible, label, percent, indeterminate, extra, start, stop }
@@ -183,7 +178,6 @@ function ProgressFooter(props: {
     </div>
   )
 }
-/* ======================================================================== */
 
 export default function App() {
   const [mode, setMode] = useState<Mode>("hvb")
@@ -195,14 +189,12 @@ export default function App() {
   const [selectedQuadrant, setSelectedQuadrant] = useState<Q | null>(null)
   const [anim, setAnim] = useState<{ q: Q; dir: D; stage: "rotating" | "reset" } | null>(null)
 
-  // HVB: choix moteur + params par moteur (pas de doublon ailleurs)
   const [engine, setEngine] = useState<EngineId>("minimax")
   const [mmDepth, setMmDepth] = useState<number>(3)
   const [mmTimeMs, setMmTimeMs] = useState<number | undefined>(undefined)
   const [mcSims, setMcSims] = useState<number>(2000)
   const [mcTimeMs, setMcTimeMs] = useState<number | undefined>(undefined)
 
-  // IA vs IA
   const [showBvbModal, setShowBvbModal] = useState(false)
   const [botBlack, setBotBlack] = useState<BotCfg>({ engine: "minimax", mmDepth: 3, mcSims: 3000 })
   const [botWhite, setBotWhite] = useState<BotCfg>({ engine: "mcts", mmDepth: 3, mcSims: 5000 })
@@ -215,7 +207,6 @@ export default function App() {
 
   const bot = human === "B" ? "W" : "B"
 
-  // barre de progression (basée sur /progress/{gid})
   const progress = useProgressPolling()
 
   useEffect(() => {
@@ -271,22 +262,17 @@ export default function App() {
     }
   }
 
-  // ---- BOT calls ----------------------------------------------------------
   function depthFromSims(sims: number) {
-    // même mapping que le serveur (sims ≈ depth*500, min 200)
     return Math.max(1, Math.round(sims / 500))
   }
-// CHANGÉ : renvoie { depth, timeMs, engine, simulations? }
 function hvbCallParams(): BotPost {
   if (engine === "minimax") {
     return { depth: mmDepth, timeMs: mmTimeMs, engine }
   }
   if (engine === "mcts") {
     if (mcTimeMs == null) {
-      // sim-capped → on envoie explicitement 'simulations'
       return { depth: Math.max(1, Math.round(mcSims / 500)), simulations: mcSims, engine }
     }
-    // time-capped
     return { depth: Math.max(1, Math.round(mcSims / 500)), timeMs: mcTimeMs, engine }
   }
   return { depth: 2, engine }
@@ -317,7 +303,7 @@ async function triggerBotHVB() {
     const who = state?.to_move === "B" ? "Noir" : "Blanc"
 
     // Barre visible si MCTS ou Minimax avec time budget
-    if (p.engine === "mcts" || (p.engine === "minimax" && p.timeMs && p.timeMs > 0)) {
+    if (p.engine === "mcts" || p.engine === "minimax") {
       progress.start(gid, `IA (${engineTitle(p.engine)}) — ${who}`)
     }
 
@@ -354,7 +340,7 @@ async function triggerBotBVB() {
   const p = bvbCallParams(cfg)
   const who = side === "B" ? "Noir" : "Blanc"
 
-  if (p.engine === "mcts" || (p.engine === "minimax" && p.timeMs && p.timeMs > 0)) {
+  if (p.engine === "mcts" || p.engine === "minimax") {
     progress.start(gid, `IA (${engineTitle(p.engine)}) — ${who}`)
   }
 

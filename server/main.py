@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Dict, Optional
 from uuid import uuid4
-import time 
+import time
 
 from pentago.game import Game
 from pentago.board import Player, Quadrant, Direction
@@ -19,17 +19,18 @@ app.add_middleware(
 )
 
 GAMES: Dict[str, Game] = {}
-PROGRESS: Dict[str, dict] = {}   # <— AJOUT
+PROGRESS: Dict[str, dict] = {}
 
 class PlayRequest(BaseModel):
     cell: str
     quadrant: str
     direction: str
+
 class BotRequest(BaseModel):
     depth: int
     time_ms: Optional[int] = None
     engine: Optional[str] = "minimax"
-    simulations: Optional[int] = None   # <-- AJOUT
+    simulations: Optional[int] = None
 
 COLS = "ABCDEF"
 ROWS = "123456"
@@ -68,7 +69,7 @@ def new_game():
     gid = uuid4().hex
     GAMES[gid] = g
     mcts_reset()
-    PROGRESS.pop(gid, None)  
+    PROGRESS.pop(gid, None)
     return {"game_id": gid, "state": to_state(g)}
 
 @app.get("/state/{gid}")
@@ -84,13 +85,10 @@ def progress(gid: str):
     if not p:
         return {"engine": None, "done": True}
     out = dict(p)
-
-    # 👇 on utilise d'abord ce que le moteur a “pushé”
     elapsed_ms = out.get("elapsed_override_ms")
     if elapsed_ms is None:
         elapsed_ms = int((time.time() - p["start_ts"]) * 1000)
     out["elapsed_ms"] = int(elapsed_ms)
-
     percent = None
     if p.get("time_ms"):
         tm = p["time_ms"]
@@ -132,11 +130,9 @@ def bot(gid: str, req: BotRequest):
         "time_ms": req.time_ms,
         "sims_target": None,
         "sims_done": 0,
-        # "elapsed_override_ms" sera rempli par le callback
     }
 
     if engine == "minimax":
-        # 👇 callback appelé périodiquement par minimax
         def _cb_ms(elapsed_ms: int):
             PROGRESS[gid]["elapsed_override_ms"] = int(elapsed_ms)
         r, c, q, d = best_move_minimax(
@@ -144,12 +140,11 @@ def bot(gid: str, req: BotRequest):
             player_to_move=side,
             max_depth=req.depth,
             time_ms=req.time_ms,
-            progress_cb=_cb_ms,             # <-- NOUVEAU
+            progress_cb=_cb_ms,
         )
 
     elif engine == "mcts":
         mcts_rebase(g.board, side, prune=False)
-
         if req.time_ms is not None:
             sims = None
         else:
@@ -157,18 +152,15 @@ def bot(gid: str, req: BotRequest):
                 sims = max(1, int(req.simulations))
             else:
                 sims = max(200, req.depth * 500)
-
         PROGRESS[gid]["sims_target"] = sims
-
         def _cb(done_sims: int):
             PROGRESS[gid]["sims_done"] = done_sims
-
         r, c, q, d = best_move_mcts(
             g.board,
             player_to_move=side,
             time_ms=req.time_ms,
             simulations=sims,
-            progress_cb=_cb,  # MCTS inchangé
+            progress_cb=_cb,
         )
     else:
         raise HTTPException(400, "engine not implemented")

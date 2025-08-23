@@ -174,13 +174,14 @@ def mcts_rebase(board: Board, to_move: Player, prune: bool = True) -> None:
     ROOT = rk
     if prune:
         _prune_unreachable(rk)
+        
 def best_move_mcts(
     board: Board,
     player_to_move: Player,
     time_ms: Optional[int] = None,
     simulations: Optional[int] = None,
     c_explore: float = 1.414,
-    progress_cb: Optional[Callable[[int], None]] = None,  
+    progress_cb: Optional[Callable[[int], None]] = None,
 ) -> Move:
     root_key = board_key(board, player_to_move)
     if root_key not in TREE:
@@ -191,6 +192,8 @@ def best_move_mcts(
 
     sims = 0
     report_every = 200
+    if simulations is not None and sims_target and sims_target > 0:
+        report_every = max(1, sims_target // 100)
 
     while True:
         if deadline is not None and time.time() > deadline:
@@ -224,7 +227,7 @@ def best_move_mcts(
                     best_m = m
             mv = best_m
             path.append((key, mv))
-            cur_board, winner, terminal, _ = apply_move(cur_board, cur_player, mv)
+            cur_board, winner, terminal, _ = apply_move(cur_board, cur_player, mv)  # type: ignore
             if terminal:
                 break
             cur_player = opponent(cur_player)
@@ -287,4 +290,4 @@ def best_move_mcts(
     if best_mv is None:
         moves = generate_moves(board)
         best_mv = moves[0]
-    return best_mv 
+    return best_mv  # type: ignore
