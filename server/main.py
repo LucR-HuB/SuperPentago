@@ -9,6 +9,7 @@ from pentago.game import Game
 from pentago.board import Player, Quadrant, Direction
 from pentago.ai.minimax import best_move as best_move_minimax
 from pentago.ai.mcts import best_move_mcts, mcts_reset, mcts_rebase
+from pentago.ai.policy import best_move as best_move_policy
 
 app = FastAPI()
 app.add_middleware(
@@ -162,6 +163,26 @@ def bot(gid: str, req: BotRequest):
             simulations=sims,
             progress_cb=_cb,
         )
+
+    elif engine == "policy":
+        if req.time_ms is not None:
+            sims = None
+        else:
+            if req.simulations is not None:
+                sims = max(1, int(req.simulations))
+            else:
+                sims = max(200, req.depth * 500)
+        PROGRESS[gid]["sims_target"] = sims
+        def _cb(done_sims: int):
+            PROGRESS[gid]["sims_done"] = done_sims
+        r, c, q, d = best_move_policy(
+            g.board,
+            player_to_move=side,
+            time_ms=req.time_ms,
+            simulations=sims,
+            progress_cb=_cb,
+        )
+
     else:
         raise HTTPException(400, "engine not implemented")
 

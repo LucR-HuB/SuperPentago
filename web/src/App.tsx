@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, useRef } from "react"
 import Board, { type BoardPhase, type Coord } from "./components/Board"
-import { apiNew, apiPlay, apiBot, apiProgress } from "./api"
+import { apiNew, apiPlay, apiBot, apiProgress} from "./api"
 import type { GameState } from "./types"
 
 type Q = "Q00" | "Q01" | "Q10" | "Q11"
@@ -19,12 +19,14 @@ type BotCfg = {
   mmTimeMs?: number
   mcSims: number
   mcTimeMs?: number
+  poSims: number
+  poTimeMs?: number
 }
 
 const ENGINES: { id: EngineId; title: string; desc: string; ready: boolean }[] = [
   { id: "minimax", title: "Minimax αβ", desc: "Recherche déterministe avec élagage alpha-beta.", ready: true },
   { id: "mcts", title: "MCTS", desc: "Arbre Monte-Carlo guidé par simulations.", ready: true },
-  { id: "policy", title: "Policy + Value", desc: "Réseau type AlphaZero.", ready: false },
+  { id: "policy", title: "Policy + Value", desc: "Réseau type AlphaZero.", ready: true },
 ]
 
 function parseMove(m: string): { r: number; c: number; q: Q; d: D } {
@@ -63,11 +65,13 @@ function winningCells(grid: number[][]): { r: number; c: number }[] | null {
 }
 
 type ServerProgress = {
-  engine: "mcts" | "minimax" | string
+  engine: "minimax" | "mcts" | "policy" | null
   sims_done?: number
   sims_target?: number
   elapsed_ms?: number
   time_ms?: number
+  done?: boolean
+  percent?: number
 }
 
 function formatMs(ms?: number) {
@@ -83,24 +87,33 @@ function useProgressPolling() {
   const [indeterminate, setIndeterminate] = useState(true)
   const [extra, setExtra] = useState<string>("")
   const intervalRef = useRef<number | null>(null)
+  const hideTimeoutRef = useRef<number | null>(null)
   const lastGidRef = useRef<string | null>(null)
+  const modeRef = useRef<"idle" | "sims" | "time" | "indet">("idle")
 
   function clearTimer() {
     if (intervalRef.current !== null) {
       clearInterval(intervalRef.current)
       intervalRef.current = null
     }
+    if (hideTimeoutRef.current !== null) {
+      clearTimeout(hideTimeoutRef.current)
+      hideTimeoutRef.current = null
+    }
   }
 
   function stop() {
     clearTimer()
     setPercent(1)
-    setTimeout(() => {
+    setIndeterminate(false)
+    hideTimeoutRef.current = window.setTimeout(() => {
       setVisible(false)
       setPercent(0)
       setExtra("")
       setLabel("")
       setIndeterminate(true)
+      modeRef.current = "idle"
+      hideTimeoutRef.current = null
     }, 200)
   }
 
@@ -109,44 +122,55 @@ function useProgressPolling() {
       clearInterval(intervalRef.current)
       intervalRef.current = null
     }
-  
+    if (hideTimeoutRef.current !== null) {
+      clearTimeout(hideTimeoutRef.current)
+      hideTimeoutRef.current = null
+    }
     lastGidRef.current = gid
+    modeRef.current = "idle"
     setLabel(text)
     setVisible(true)
     setIndeterminate(true)
     setPercent(0)
     setExtra("")
-  
+
     intervalRef.current = window.setInterval(async () => {
       try {
         const p = await apiProgress(gid)
+        if (lastGidRef.current !== gid) return
         if (p.done) {
           setPercent(1)
           setIndeterminate(false)
-          setTimeout(() => stop(), 100)
+          setTimeout(() => stop(), 120)
           return
         }
-  
         if (!p.engine) return
-  
-        if (p.sims_done != null && p.sims_target && p.sims_target > 0) {
-          const ratio = Math.min(0.99, (p.sims_done as number) / (p.sims_target as number))
+
+        if (modeRef.current === "idle") {
+          if (p.sims_target && p.sims_target > 0) modeRef.current = "sims"
+          else if (p.time_ms && p.time_ms > 0) modeRef.current = "time"
+          else modeRef.current = "indet"
+        }
+
+        if (modeRef.current === "sims") {
+          const tgt = p.sims_target || 0
+          const done = p.sims_done || 0
+          const ratio = tgt > 0 ? Math.min(0.99, done / tgt) : 0
           setPercent(ratio)
           setIndeterminate(false)
-          setExtra(`${p.sims_done!.toLocaleString()} / ${p.sims_target!.toLocaleString()} sims`)
-        }
-        else if (p.elapsed_ms != null && p.time_ms && p.time_ms > 0) {
-          const ratio = Math.min(0.99, (p.elapsed_ms as number) / (p.time_ms as number))
+          setExtra(`${done.toLocaleString()} / ${tgt.toLocaleString()} sims`)
+        } else if (modeRef.current === "time") {
+          const ems = p.elapsed_ms || 0
+          const tms = p.time_ms || 0
+          const ratio = tms > 0 ? Math.min(0.99, ems / tms) : 0
           setPercent(ratio)
           setIndeterminate(false)
-          setExtra(`${Math.round(p.elapsed_ms!)}ms / ${p.time_ms}ms`)
-        }
-        else {
+          setExtra(`${Math.round(ems)}ms / ${tms}ms`)
+        } else {
           setIndeterminate(true)
           setExtra("")
         }
-      } catch {
-      }
+      } catch {}
     }, 150)
   }
 
@@ -194,10 +218,12 @@ export default function App() {
   const [mmTimeMs, setMmTimeMs] = useState<number | undefined>(undefined)
   const [mcSims, setMcSims] = useState<number>(2000)
   const [mcTimeMs, setMcTimeMs] = useState<number | undefined>(undefined)
+  const [poSims, setPoSims] = useState<number>(4000)
+  const [poTimeMs, setPoTimeMs] = useState<number | undefined>(undefined)
 
   const [showBvbModal, setShowBvbModal] = useState(false)
-  const [botBlack, setBotBlack] = useState<BotCfg>({ engine: "minimax", mmDepth: 3, mcSims: 3000 })
-  const [botWhite, setBotWhite] = useState<BotCfg>({ engine: "mcts", mmDepth: 3, mcSims: 5000 })
+  const [botBlack, setBotBlack] = useState<BotCfg>({ engine: "minimax", mmDepth: 3, mcSims: 3000, poSims: 4000 })
+  const [botWhite, setBotWhite] = useState<BotCfg>({ engine: "mcts", mmDepth: 3, mcSims: 5000, poSims: 4000 })
 
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState("")
@@ -265,112 +291,125 @@ export default function App() {
   function depthFromSims(sims: number) {
     return Math.max(1, Math.round(sims / 500))
   }
-function hvbCallParams(): BotPost {
-  if (engine === "minimax") {
-    return { depth: mmDepth, timeMs: mmTimeMs, engine }
-  }
-  if (engine === "mcts") {
-    if (mcTimeMs == null) {
-      return { depth: Math.max(1, Math.round(mcSims / 500)), simulations: mcSims, engine }
+
+  function hvbCallParams(): BotPost {
+    if (engine === "minimax") {
+      return { depth: mmDepth, timeMs: mmTimeMs, engine }
     }
-    return { depth: Math.max(1, Math.round(mcSims / 500)), timeMs: mcTimeMs, engine }
-  }
-  return { depth: 2, engine }
-}
-
-function bvbCallParams(cfg: BotCfg): BotPost {
-  if (cfg.engine === "minimax") {
-    return { depth: cfg.mmDepth, timeMs: cfg.mmTimeMs, engine: cfg.engine }
-  }
-  if (cfg.engine === "mcts") {
-    if (cfg.mcTimeMs == null) {
-      return { depth: Math.max(1, Math.round(cfg.mcSims / 500)), simulations: cfg.mcSims, engine: cfg.engine }
+    if (engine === "mcts") {
+      if (mcTimeMs == null) {
+        return { depth: Math.max(1, Math.round(mcSims / 500)), simulations: mcSims, engine }
+      }
+      return { depth: Math.max(1, Math.round(mcSims / 500)), timeMs: mcTimeMs, engine }
     }
-    return { depth: Math.max(1, Math.round(cfg.mcSims / 500)), timeMs: cfg.mcTimeMs, engine: cfg.engine }
-  } 
-  return { depth: 2, engine: cfg.engine }
-}
+    if (engine === "policy") {
+      if (poTimeMs == null) {
+        return { depth: Math.max(1, Math.round(poSims / 500)), simulations: poSims, engine }
+      }
+      return { depth: Math.max(1, Math.round(poSims / 500)), timeMs: poTimeMs, engine }
+    }
+    return { depth: 2, engine }
+  }
 
-async function triggerBotHVB() {
-  if (mode !== "hvb") return
-  if (busy || !state || state.terminal) return
-  if (state.to_move !== bot) return
+  function bvbCallParams(cfg: BotCfg): BotPost {
+    if (cfg.engine === "minimax") {
+      return { depth: cfg.mmDepth, timeMs: cfg.mmTimeMs, engine: cfg.engine }
+    }
+    if (cfg.engine === "mcts") {
+      if (cfg.mcTimeMs == null) {
+        return { depth: Math.max(1, Math.round(cfg.mcSims / 500)), simulations: cfg.mcSims, engine: cfg.engine }
+      }
+      return { depth: Math.max(1, Math.round(cfg.mcSims / 500)), timeMs: cfg.mcTimeMs, engine: cfg.engine }
+    }
+    if (cfg.engine === "policy") {
+      if (cfg.poTimeMs == null) {
+        return { depth: Math.max(1, Math.round(cfg.poSims / 500)), simulations: cfg.poSims, engine: cfg.engine }
+      }
+      return { depth: Math.max(1, Math.round(cfg.poSims / 500)), timeMs: cfg.poTimeMs, engine: cfg.engine }
+    }
+    return { depth: 2, engine: cfg.engine }
+  }
 
-  setBusy(true)
-  setError("")
-  try {
-    const p = hvbCallParams()
-    const who = state?.to_move === "B" ? "Noir" : "Blanc"
+  async function triggerBotHVB() {
+    if (mode !== "hvb") return
+    if (busy || !state || state.terminal) return
+    if (state.to_move !== bot) return
 
-    // Barre visible si MCTS ou Minimax avec time budget
-    if (p.engine === "mcts" || p.engine === "minimax") {
+    setBusy(true)
+    setError("")
+    try {
+      const p = hvbCallParams()
+      const who = state?.to_move === "B" ? "Noir" : "Blanc"
+
+      if (p.engine === "mcts" || p.engine === "policy" || (p.engine === "minimax" && p.timeMs && p.timeMs > 0)) {
+        progress.start(gid, `IA (${engineTitle(p.engine)}) — ${who}`)
+      }
+
+      const res = await apiBot(gid, p)
+      const { r, c, q, d } = parseMove(res.move)
+      setSelectedCell({ r, c })
+      setSelectedQuadrant(q)
+      setPhase("rotate")
+      setTimeout(() => {
+        setAnim({ q, dir: d, stage: "rotating" })
+        setTimeout(() => {
+          setState(res.state)
+          setSelectedCell(null)
+          setSelectedQuadrant(null)
+          setAnim(a => a ? { ...a, stage: "reset" } : null)
+          requestAnimationFrame(() => setAnim(null))
+          setPhase("place")
+          setBusy(false)
+          progress.stop()
+        }, 320)
+      }, 0)
+    } catch {
+      setBusy(false)
+      setError("bot")
+      progress.stop()
+    }
+  }
+
+  async function triggerBotBVB() {
+    if (mode !== "bvb") return
+    if (busy || !state || state.terminal) return
+
+    const side = state.to_move
+    const cfg = side === "B" ? botBlack : botWhite
+    const p = bvbCallParams(cfg)
+    const who = side === "B" ? "Noir" : "Blanc"
+
+    if (p.engine === "mcts" || p.engine === "policy" || (p.engine === "minimax" && p.timeMs && p.timeMs > 0)) {
       progress.start(gid, `IA (${engineTitle(p.engine)}) — ${who}`)
     }
 
-    const res = await apiBot(gid, p)
-    const { r, c, q, d } = parseMove(res.move)
-    setSelectedCell({ r, c })
-    setSelectedQuadrant(q)
-    setPhase("rotate")
-    setTimeout(() => {
-      setAnim({ q, dir: d, stage: "rotating" })
+    setBusy(true)
+    setError("")
+    try {
+      const res = await apiBot(gid, p)
+      const { r, c, q, d } = parseMove(res.move)
+      setSelectedCell({ r, c })
+      setSelectedQuadrant(q)
+      setPhase("rotate")
       setTimeout(() => {
-        setState(res.state)
-        setSelectedCell(null)
-        setSelectedQuadrant(null)
-        setAnim(a => a ? { ...a, stage: "reset" } : null)
-        requestAnimationFrame(() => setAnim(null))
-        setPhase("place")
-        setBusy(false)
-        progress.stop()
-      }, 320)
-    }, 0)
-  } catch {
-    setBusy(false)
-    setError("bot")
-    progress.stop()
+        setAnim({ q, dir: d, stage: "rotating" })
+        setTimeout(() => {
+          setState(res.state)
+          setSelectedCell(null)
+          setSelectedQuadrant(null)
+          setAnim(a => a ? { ...a, stage: "reset" } : null)
+          requestAnimationFrame(() => setAnim(null))
+          setPhase("place")
+          setBusy(false)
+          progress.stop()
+        }, 320)
+      }, 0)
+    } catch {
+      setBusy(false)
+      setError("bot")
+      progress.stop()
+    }
   }
-}
-async function triggerBotBVB() {
-  if (mode !== "bvb") return
-  if (busy || !state || state.terminal) return
-
-  const side = state.to_move
-  const cfg = side === "B" ? botBlack : botWhite
-  const p = bvbCallParams(cfg)
-  const who = side === "B" ? "Noir" : "Blanc"
-
-  if (p.engine === "mcts" || p.engine === "minimax") {
-    progress.start(gid, `IA (${engineTitle(p.engine)}) — ${who}`)
-  }
-
-  setBusy(true)
-  setError("")
-  try {
-    const res = await apiBot(gid, p)
-    const { r, c, q, d } = parseMove(res.move)
-    setSelectedCell({ r, c })
-    setSelectedQuadrant(q)
-    setPhase("rotate")
-    setTimeout(() => {
-      setAnim({ q, dir: d, stage: "rotating" })
-      setTimeout(() => {
-        setState(res.state)
-        setSelectedCell(null)
-        setSelectedQuadrant(null)
-        setAnim(a => a ? { ...a, stage: "reset" } : null)
-        requestAnimationFrame(() => setAnim(null))
-        setPhase("place")
-        setBusy(false)
-        progress.stop()
-      }, 320)
-    }, 0)
-  } catch {
-    setBusy(false)
-    setError("bot")
-    progress.stop()
-  }
-}
 
   useEffect(() => {
     if (!state || state.terminal) return
@@ -379,10 +418,8 @@ async function triggerBotBVB() {
     } else {
       if (!busy) triggerBotBVB()
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state, busy, mode, bot, engine, mmDepth, mmTimeMs, mcSims, mcTimeMs, botBlack, botWhite])
+  }, [state, busy, mode, bot, engine, mmDepth, mmTimeMs, mcSims, mcTimeMs, poSims, poTimeMs, botBlack, botWhite])
 
-  // ---- New games ----------------------------------------------------------
   async function startNewHVB(h: "B" | "W") {
     if (busy) return
     setMode("hvb")
@@ -426,7 +463,6 @@ async function triggerBotBVB() {
     }
   }
 
-  // ---- UI helpers ---------------------------------------------------------
   function openNewGameModal() {
     if (busy) return
     setShowColorModal(true)
@@ -453,8 +489,10 @@ async function triggerBotBVB() {
       return `Minimax — profondeur ${cfg.mmDepth}${cfg.mmTimeMs ? `, ${cfg.mmTimeMs}ms` : ""}`
     } else if (cfg.engine === "mcts") {
       return `MCTS — ${cfg.mcSims} simulations${cfg.mcTimeMs ? `, ${cfg.mcTimeMs}ms` : ""}`
+    } else if (cfg.engine === "policy") {
+      return `Policy — ${cfg.poSims} simulations${cfg.poTimeMs ? `, ${cfg.poTimeMs}ms` : ""}`
     }
-    return "Policy (bientôt)"
+    return "Policy"
   }
 
   const thinkingChip = state && !state.terminal ? (
@@ -466,7 +504,6 @@ async function triggerBotBVB() {
     </div>
   ) : null
 
-  // ---- Render -------------------------------------------------------------
   return (
     <div className={"min-h-screen w-full " + bgClass}>
       <div className="mx-auto max-w-6xl px-6 py-10">
@@ -507,7 +544,6 @@ async function triggerBotBVB() {
               {error && <div className="text-sm text-red-700 bg-red-100 px-3 py-1 rounded">{error}</div>}
             </div>
 
-            {/* Panneau paramètres : moteur unique visible ici */}
             <div className="bg-white rounded-2xl border border-gray-200 shadow p-4 flex flex-col gap-3">
               {mode === "hvb" ? (
                 <>
@@ -548,9 +584,7 @@ async function triggerBotBVB() {
                         value={mcSims}
                         onChange={e => setMcSims(parseInt(e.target.value || "200"))}
                       />
-                      <div className="text-xs text-gray-600">
-                        Conseil : 200–20 000 (plus = plus fort, plus lent)
-                      </div>
+                      <div className="text-xs text-gray-600">Conseil : 200–20 000</div>
 
                       <label className="text-sm mt-2">Temps (ms, optionnel)</label>
                       <input
@@ -564,7 +598,25 @@ async function triggerBotBVB() {
                   )}
 
                   {engine === "policy" && (
-                    <div className="text-xs text-gray-600">Bientôt disponible.</div>
+                    <>
+                      <label className="text-sm">Simulations</label>
+                      <input
+                        type="number"
+                        className="border border-gray-300 rounded px-2 py-1"
+                        min={200}
+                        step={100}
+                        value={poSims}
+                        onChange={e => setPoSims(parseInt(e.target.value || "200"))}
+                      />
+                      <label className="text-sm mt-2">Temps (ms, optionnel)</label>
+                      <input
+                        type="number"
+                        className="border border-gray-300 rounded px-2 py-1"
+                        value={poTimeMs ?? ""}
+                        placeholder="ms"
+                        onChange={e => setPoTimeMs(e.target.value === "" ? undefined : parseInt(e.target.value))}
+                      />
+                    </>
                   )}
 
                   <div className="text-xs break-all text-gray-500 mt-2">Game ID: {gid}</div>
@@ -643,7 +695,6 @@ async function triggerBotBVB() {
               <div className="ai-note">Choisis un moteur et ses paramètres pour chaque couleur, puis lance le match.</div>
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {/* Noir */}
                 <div className="ai-card">
                   <div className="ai-title">Noir</div>
                   <select
@@ -695,9 +746,29 @@ async function triggerBotBVB() {
                       />
                     </>
                   )}
+                  {botBlack.engine === "policy" && (
+                    <>
+                      <label className="text-sm">Simulations</label>
+                      <input
+                        type="number"
+                        className="border border-gray-300 rounded px-2 py-1"
+                        value={botBlack.poSims}
+                        min={200}
+                        step={100}
+                        onChange={e => setBotBlack({ ...botBlack, poSims: parseInt(e.target.value || "200") })}
+                      />
+                      <label className="text-sm mt-2">Temps (ms, optionnel)</label>
+                      <input
+                        type="number"
+                        className="border border-gray-300 rounded px-2 py-1"
+                        value={botBlack.poTimeMs ?? ""}
+                        placeholder="ms"
+                        onChange={e => setBotBlack({ ...botBlack, poTimeMs: e.target.value === "" ? undefined : parseInt(e.target.value) })}
+                      />
+                    </>
+                  )}
                 </div>
 
-                {/* Blanc */}
                 <div className="ai-card">
                   <div className="ai-title">Blanc</div>
                   <select
@@ -749,6 +820,27 @@ async function triggerBotBVB() {
                       />
                     </>
                   )}
+                  {botWhite.engine === "policy" && (
+                    <>
+                      <label className="text-sm">Simulations</label>
+                      <input
+                        type="number"
+                        className="border border-gray-300 rounded px-2 py-1"
+                        value={botWhite.poSims}
+                        min={200}
+                        step={100}
+                        onChange={e => setBotWhite({ ...botWhite, poSims: parseInt(e.target.value || "200") })}
+                      />
+                      <label className="text-sm mt-2">Temps (ms, optionnel)</label>
+                      <input
+                        type="number"
+                        className="border border-gray-300 rounded px-2 py-1"
+                        value={botWhite.poTimeMs ?? ""}
+                        placeholder="ms"
+                        onChange={e => setBotWhite({ ...botWhite, poTimeMs: e.target.value === "" ? undefined : parseInt(e.target.value) })}
+                      />
+                    </>
+                  )}
                 </div>
               </div>
 
@@ -764,7 +856,6 @@ async function triggerBotBVB() {
 
       </div>
 
-      {/* Barre de progression (bas de page) */}
       <ProgressFooter
         visible={progress.visible}
         label={progress.label}

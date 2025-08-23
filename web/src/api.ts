@@ -1,6 +1,5 @@
 // web/src/api.ts
 import type { NewGameResponse, StateResponse, BotMoveResponse } from "./types"
-
 const BASE = import.meta.env.VITE_API_URL || "http://127.0.0.1:8000"
 
 export async function apiNew(): Promise<NewGameResponse> {
